@@ -87,6 +87,7 @@ PRODUCT_PROPERTY_OVERRIDES += \
     persist.camera.mobicat=2 \
     persist.camera.stats.debugexif=3080192 \
     persist.ts.rtmakeup=false \
+    persist.vendor.camera.tintless.skip=1 \
     vendor.camera.hal1.packagelist=com.eg.android.AlipayGphone,com.taobao.taobao,com.tencent.mm,com.tencent.mobileqq
 
 # CNE
