@@ -48,6 +48,15 @@
 
 using namespace loc_core;
 
+const float CarrierFrequencies[] = {
+    0.0,            // UNKNOWN
+    1575420000.0,   // L1C
+    1575420000.0,   // SBAS_L1
+    1602000000.0,   // GLONASS_G1
+    1575420000.0,   // QZSS_L1CA
+    1561098000.0,   // BEIDOU_B1
+    1575420000.0 }; // GALILEO_E1
+
 /* Doppler Conversion from M/S to NS/S */
 #define MPS_TO_NSPS         (1.0/0.299792458)
 
@@ -278,10 +287,9 @@ LocApiV02 :: open(LOC_API_ADAPTER_EVENT_MASK_T mask)
 
     // it is important to cap the mask here, because not all LocApi's
     // can enable the same bits, e.g. foreground and bckground.
-    status = locClientOpen(adjustMaskForNoSession(qmiMask), &globalCallbacks,
-                           &clientHandle, (void *)this);
     mMask = newMask;
-    mQmiMask = qmiMask;
+    mQmiMask = adjustMaskIfNoSession(qmiMask);
+    status = locClientOpen(mQmiMask, &globalCallbacks, &clientHandle, (void *)this);
     if (eLOC_CLIENT_SUCCESS != status ||
         clientHandle == LOC_CLIENT_INVALID_HANDLE_VALUE )
     {
@@ -426,15 +434,7 @@ LocApiV02 :: open(LOC_API_ADAPTER_EVENT_MASK_T mask)
   } else if (newMask != mMask) {
     // it is important to cap the mask here, because not all LocApi's
     // can enable the same bits, e.g. foreground and background.
-    if (!registerEventMask(qmiMask)) {
-      // we do not update mMask here, because it did not change
-      // as the mask update has failed.
-      rtv = LOC_API_ADAPTER_ERR_FAILURE;
-    }
-    else {
-        mMask = newMask;
-        mQmiMask = qmiMask;
-    }
+    registerEventMask(newMask);
   }
   /*Set the SV Measurement Constellation when Measurement Report or Polynomial report is set*/
   if( (qmiMask & QMI_LOC_EVENT_MASK_GNSS_MEASUREMENT_REPORT_V02) ||
@@ -456,30 +456,31 @@ LocApiV02 :: open(LOC_API_ADAPTER_EVENT_MASK_T mask)
   return rtv;
 }
 
-bool LocApiV02 :: registerEventMask(locClientEventMaskType qmiMask)
+void LocApiV02 :: registerEventMask(LOC_API_ADAPTER_EVENT_MASK_T adapterMask)
 {
-    // if NOT in session and NOT the Background Loc Client, adjust the mask
-    if (!mInSession && (LocDualContext::mBgExclMask & mMask)) {
-        qmiMask = adjustMaskForNoSession(qmiMask);
+    locClientEventMaskType qmiMask = adjustMaskIfNoSession(convertMask(adapterMask));
+    if ((qmiMask != mQmiMask) && (locClientRegisterEventMask(clientHandle, qmiMask))) {
+        mQmiMask = qmiMask;
     }
-    LOC_LOGD("%s:%d]: mQmiMask=%" PRIu64 " qmiMask=%" PRIu64,
-             __func__, __LINE__, mQmiMask, qmiMask);
-    return locClientRegisterEventMask(clientHandle, qmiMask);
+    LOC_LOGd("registerEventMask:  mMask: %" PRIu64 " mQmiMask=%" PRIu64 " qmiMask=%" PRIu64,
+                adapterMask, mQmiMask, qmiMask);
+    mMask = adapterMask;
 }
 
-locClientEventMaskType LocApiV02 :: adjustMaskForNoSession(locClientEventMaskType qmiMask)
+locClientEventMaskType LocApiV02 :: adjustMaskIfNoSession(locClientEventMaskType qmiMask)
 {
-    LOC_LOGD("%s:%d]: before qmiMask=%" PRIu64,
-             __func__, __LINE__, qmiMask);
-    locClientEventMaskType clearMask = QMI_LOC_EVENT_MASK_POSITION_REPORT_V02 |
-                                       QMI_LOC_EVENT_MASK_GNSS_SV_INFO_V02 |
-                                       QMI_LOC_EVENT_MASK_NMEA_V02 |
-                                       QMI_LOC_EVENT_MASK_ENGINE_STATE_V02 |
-                                       QMI_LOC_EVENT_MASK_GNSS_MEASUREMENT_REPORT_V02;
+    locClientEventMaskType oldQmiMask = qmiMask;
+    if (!mInSession) {
+        locClientEventMaskType clearMask = QMI_LOC_EVENT_MASK_POSITION_REPORT_V02 |
+                                           QMI_LOC_EVENT_MASK_GNSS_SV_INFO_V02 |
+                                           QMI_LOC_EVENT_MASK_NMEA_V02 |
+                                           QMI_LOC_EVENT_MASK_ENGINE_STATE_V02 |
+                                           QMI_LOC_EVENT_MASK_GNSS_MEASUREMENT_REPORT_V02;
 
-    qmiMask = qmiMask & ~clearMask;
-    LOC_LOGD("%s:%d]: after qmiMask=%" PRIu64,
-             __func__, __LINE__, qmiMask);
+        qmiMask = qmiMask & ~clearMask;
+    }
+    LOC_LOGd("oldQmiMask=%" PRIu64 " qmiMask=%" PRIu64 " mInSession: %d",
+            oldQmiMask, qmiMask, mInSession);
     return qmiMask;
 }
 
@@ -493,6 +494,8 @@ enum loc_api_adapter_err LocApiV02 :: close()
       LOC_API_ADAPTER_ERR_SUCCESS : LOC_API_ADAPTER_ERR_FAILURE;
 
   mMask = 0;
+  mQmiMask = 0;
+  mInSession = false;
   clientHandle = LOC_CLIENT_INVALID_HANDLE_VALUE;
 
   return rtv;
@@ -519,7 +522,7 @@ enum loc_api_adapter_err LocApiV02 :: startFix(const LocPosMode& fixCriteria)
 
   mInSession = true;
   mMeasurementsStarted = true;
-  registerEventMask(mQmiMask);
+  registerEventMask(mMask);
 
   // fill in the start request
   switch(fixCriteria.mode)
@@ -665,7 +668,7 @@ enum loc_api_adapter_err LocApiV02 :: stopFix()
   // if engine on never happend, deregister events
   // without waiting for Engine Off
   if (!mEngineOn) {
-      registerEventMask(mQmiMask);
+      registerEventMask(mMask);
   }
 
   if( eLOC_CLIENT_SUCCESS != status)
@@ -2556,59 +2559,63 @@ void  LocApiV02 :: reportSv (
       {
         GnssSvOptionsMask mask = 0;
 
-        SvNotify.gnssSvs[SvNotify.count].size = sizeof(GnssSv);
+        GnssSv &gnssSv_ref = SvNotify.gnssSvs[SvNotify.count];
+        gnssSv_ref.carrierFrequencyHz = 0;
+        mask |= GNSS_SV_OPTIONS_HAS_CARRIER_FREQUENCY_BIT;
+        gnssSv_ref.size = sizeof(GnssSv);
         switch (sv_info_ptr->system)
         {
           case eQMI_LOC_SV_SYSTEM_GPS_V02:
-            SvNotify.gnssSvs[SvNotify.count].svId = sv_info_ptr->gnssSvId;
-            SvNotify.gnssSvs[SvNotify.count].type = GNSS_SV_TYPE_GPS;
+            gnssSv_ref.svId = sv_info_ptr->gnssSvId;
+            gnssSv_ref.type = GNSS_SV_TYPE_GPS;
             break;
 
           case eQMI_LOC_SV_SYSTEM_GALILEO_V02:
-            SvNotify.gnssSvs[SvNotify.count].svId = sv_info_ptr->gnssSvId-300;
-            SvNotify.gnssSvs[SvNotify.count].type = GNSS_SV_TYPE_GALILEO;
+            gnssSv_ref.svId = sv_info_ptr->gnssSvId-300;
+            gnssSv_ref.type = GNSS_SV_TYPE_GALILEO;
             break;
 
           case eQMI_LOC_SV_SYSTEM_SBAS_V02:
-            SvNotify.gnssSvs[SvNotify.count].svId = sv_info_ptr->gnssSvId;
-            SvNotify.gnssSvs[SvNotify.count].type = GNSS_SV_TYPE_SBAS;
+            gnssSv_ref.svId = sv_info_ptr->gnssSvId;
+            gnssSv_ref.type = GNSS_SV_TYPE_SBAS;
             break;
 
           case eQMI_LOC_SV_SYSTEM_GLONASS_V02:
-            SvNotify.gnssSvs[SvNotify.count].svId = sv_info_ptr->gnssSvId;
-            SvNotify.gnssSvs[SvNotify.count].type = GNSS_SV_TYPE_GLONASS;
+            gnssSv_ref.svId = sv_info_ptr->gnssSvId;
+            gnssSv_ref.type = GNSS_SV_TYPE_GLONASS;
             break;
 
           case eQMI_LOC_SV_SYSTEM_BDS_V02:
-            SvNotify.gnssSvs[SvNotify.count].svId = sv_info_ptr->gnssSvId - 200;
-            SvNotify.gnssSvs[SvNotify.count].type = GNSS_SV_TYPE_BEIDOU;
+            gnssSv_ref.svId = sv_info_ptr->gnssSvId - 200;
+            gnssSv_ref.type = GNSS_SV_TYPE_BEIDOU;
             break;
 
           case eQMI_LOC_SV_SYSTEM_QZSS_V02:
-            SvNotify.gnssSvs[SvNotify.count].svId = sv_info_ptr->gnssSvId - 192;
-            SvNotify.gnssSvs[SvNotify.count].type = GNSS_SV_TYPE_QZSS;
+            gnssSv_ref.svId = sv_info_ptr->gnssSvId - 192;
+            gnssSv_ref.type = GNSS_SV_TYPE_QZSS;
             break;
 
           case eQMI_LOC_SV_SYSTEM_COMPASS_V02:
           default:
-            SvNotify.gnssSvs[SvNotify.count].svId = sv_info_ptr->gnssSvId;
-            SvNotify.gnssSvs[SvNotify.count].type = GNSS_SV_TYPE_UNKNOWN;
+            mask = 0;
+            gnssSv_ref.svId = sv_info_ptr->gnssSvId;
+            gnssSv_ref.type = GNSS_SV_TYPE_UNKNOWN;
             break;
         }
 
         if (sv_info_ptr->validMask & QMI_LOC_SV_INFO_MASK_VALID_SNR_V02)
         {
-          SvNotify.gnssSvs[SvNotify.count].cN0Dbhz = sv_info_ptr->snr;
+          gnssSv_ref.cN0Dbhz = sv_info_ptr->snr;
         }
 
         if (sv_info_ptr->validMask & QMI_LOC_SV_INFO_MASK_VALID_ELEVATION_V02)
         {
-           SvNotify.gnssSvs[SvNotify.count].elevation = sv_info_ptr->elevation;
+          gnssSv_ref.elevation = sv_info_ptr->elevation;
         }
 
         if (sv_info_ptr->validMask & QMI_LOC_SV_INFO_MASK_VALID_AZIMUTH_V02)
         {
-          SvNotify.gnssSvs[SvNotify.count].azimuth = sv_info_ptr->azimuth;
+          gnssSv_ref.azimuth = sv_info_ptr->azimuth;
         }
 
         if (sv_info_ptr->validMask &
@@ -2625,8 +2632,9 @@ void  LocApiV02 :: reportSv (
               mask |= GNSS_SV_OPTIONS_HAS_ALMANAC_BIT;
           }
         }
+        gnssSv_ref.carrierFrequencyHz += CarrierFrequencies[gnssSv_ref.type];
 
-        SvNotify.gnssSvs[SvNotify.count].gnssSvOptionsMask = mask;
+        gnssSv_ref.gnssSvOptionsMask = mask;
 
         SvNotify.count++;
       }
@@ -3098,7 +3106,7 @@ void LocApiV02 :: reportEngineState (
           // If EngineOn is true and InSession is false and Engine is just turned off,
           // then unregister the gps tracking specific event masks
           if (mpLocApiV02->mEngineOn && !mpLocApiV02->mInSession && !mEngineOn) {
-              mpLocApiV02->registerEventMask(mpLocApiV02->mQmiMask);
+              mpLocApiV02->registerEventMask(mpLocApiV02->mMask);
           }
           mpLocApiV02->mEngineOn = mEngineOn;
 
@@ -3112,7 +3120,7 @@ void LocApiV02 :: reportEngineState (
           } else {
               mpLocApiV02->reportStatus(LOC_GPS_STATUS_SESSION_END);
               mpLocApiV02->reportStatus(LOC_GPS_STATUS_ENGINE_OFF);
-              mpLocApiV02->registerEventMask(mpLocApiV02->mQmiMask);
+              mpLocApiV02->registerEventMask(mpLocApiV02->mMask);
               for (auto resender : mpLocApiV02->mResenders) {
                   LOC_LOGV("%s:%d]: resend failed command.", __func__, __LINE__);
                   resender();
@@ -3626,6 +3634,8 @@ void LocApiV02 :: convertGnssMeasurements (GnssMeasurementsData& measurementData
     // flag initiation
     GnssMeasurementsDataFlagsMask flags = 0;
 
+    flags |= GNSS_MEASUREMENTS_DATA_CARRIER_FREQUENCY_BIT;
+    measurementData.carrierFrequencyHz = 0;
     // constellation and svid
     switch (gnss_measurement_report_ptr.system)
     {
@@ -3654,6 +3664,14 @@ void LocApiV02 :: convertGnssMeasurements (GnssMeasurementsData& measurementData
             {
                 measurementData.svId = gnss_measurement_info.gloFrequency + 92;
             }
+            // GLONASS is FDMA system, so each channel has its own carrier frequency
+            // The formula is f(k) = fc + k * 0.5625;
+            // This is applicable for GLONASS G1 only, where fc = 1602MHz
+            if ((gnss_measurement_info.gloFrequency >= 1 &&
+                 gnss_measurement_info.gloFrequency <= 14)) {
+                measurementData.carrierFrequencyHz +=
+                    ((gnss_measurement_info.gloFrequency - 8) * 562500);
+            }
             break;
 
         case eQMI_LOC_SV_SYSTEM_BDS_V02:
@@ -3667,10 +3685,12 @@ void LocApiV02 :: convertGnssMeasurements (GnssMeasurementsData& measurementData
             break;
 
         default:
+            flags = 0;
             measurementData.svType = GNSS_SV_TYPE_UNKNOWN;
             measurementData.svId = gnss_measurement_info.gnssSvId;
             break;
     }
+    measurementData.carrierFrequencyHz += CarrierFrequencies[measurementData.svType];
 
     // time_offset_ns
     if (0 != gnss_measurement_info.measLatency)
@@ -4398,6 +4418,13 @@ getBestAvailableZppFix(LocGpsLocation &zppLoc, GpsLocationExtended & location_ex
             if (zpp_ind.technologyMask_valid) {
                 tech_mask = zpp_ind.technologyMask;
             }
+            struct timespec time_info;
+            uint64_t  time_since_boot;
+            clock_gettime(CLOCK_BOOTTIME, &time_info);
+            time_since_boot = time_info.tv_sec * 1000000000;
+            time_since_boot += time_info.tv_nsec;
+            location_extended.flags |=  GPS_LOCATION_EXTENDED_HAS_ELAPSED_TIME;
+            location_extended.elapsedTime = time_since_boot;
         }
     }
 
@@ -4737,16 +4764,32 @@ locClientStatusEnumType LocApiV02::locSyncSendReq(uint32_t req_id,
             timeout_msec, ind_id, ind_payload_ptr);
     if (eLOC_CLIENT_FAILURE_ENGINE_BUSY == status ||
             (eLOC_CLIENT_SUCCESS == status && nullptr != ind_payload_ptr &&
-            eLOC_CLIENT_FAILURE_ENGINE_BUSY == *((qmiLocStatusEnumT_v02*)ind_payload_ptr))) {
-        if (mResenders.empty()) {
-            registerEventMask(mQmiMask | QMI_LOC_EVENT_MASK_ENGINE_STATE_V02);
+            eLOC_CLIENT_FAILURE_ENGINE_BUSY == *((locClientStatusEnumType*)ind_payload_ptr))) {
+        if (mResenders.empty() && ((mQmiMask & QMI_LOC_EVENT_MASK_ENGINE_STATE_V02) == 0)) {
+            locClientRegisterEventMask(clientHandle, mQmiMask | QMI_LOC_EVENT_MASK_ENGINE_STATE_V02);
         }
-        LOC_LOGD("%s:%d]: Engine busy, cache req: %d", __func__, __LINE__, req_id);
-        mResenders.push_back([=](){
-                // ignore indicator, we use nullptr as the last parameter
-                loc_sync_send_req(clientHandle, req_id, req_payload,
-                    timeout_msec, ind_id, nullptr);
+        LOC_LOGd("Engine busy, cache req: %d", req_id);
+        uint32_t reqLen = 0;
+        void* pReqData = nullptr;
+        locClientReqUnionType req_payload_copy = {nullptr};
+        validateRequest(req_id, req_payload, &pReqData, &reqLen);
+        if (nullptr != pReqData) {
+            req_payload_copy.pReqData = malloc(reqLen);
+            if (nullptr != req_payload_copy.pReqData) {
+                memcpy(req_payload_copy.pReqData, pReqData, reqLen);
+            }
+        }
+        // something would be wrong if (nullptr != pReqData && nullptr == req_payload_copy)
+        if (nullptr == pReqData || nullptr != req_payload_copy.pReqData) {
+            mResenders.push_back([=](){
+                    // ignore indicator, we use nullptr as the last parameter
+                    loc_sync_send_req(clientHandle, req_id, req_payload_copy,
+                                      timeout_msec, ind_id, nullptr);
+                    if (nullptr != req_payload_copy.pReqData) {
+                        free(req_payload_copy.pReqData);
+                    }
                 });
+        }
     }
     return status;
 }
