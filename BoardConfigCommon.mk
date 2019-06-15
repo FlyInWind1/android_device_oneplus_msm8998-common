@@ -31,6 +31,9 @@ TARGET_SPECIFIC_HEADER_PATH := $(PLATFORM_PATH)/include
 
 BOARD_VENDOR := oneplus
 
+# Vendor Security Patch Level
+VENDOR_SECURITY_PATCH := 2019-06-05
+
 # we are too big to fit in
 PRODUCT_SKIP_FINGERPRINT_FROM_FILE := true
 
